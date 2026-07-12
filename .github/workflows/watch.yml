@@ -1,0 +1,44 @@
+name: watch
+
+on:
+  schedule:
+    # Toutes les 5 minutes (GitHub peut décaler chaque run de quelques minutes).
+    - cron: "*/5 * * * *"
+  workflow_dispatch: {}
+
+concurrency:
+  group: watch
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  check-and-book:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Vérifier les disponibilités et réserver
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RESA_PHONE: ${{ secrets.RESA_PHONE }}
+          RESA_FIRSTNAME: ${{ secrets.RESA_FIRSTNAME }}
+          RESA_LASTNAME: ${{ secrets.RESA_LASTNAME }}
+          RESA_EMAIL: ${{ secrets.RESA_EMAIL }}
+          RESA_CIVILITY: ${{ secrets.RESA_CIVILITY }}
+        run: python3 bot.py
+
+      - name: Persister l'état
+        if: always()
+        run: |
+          if [ -f state.json ] && [ -n "$(git status --porcelain state.json)" ]; then
+            git config user.name "table-watcher"
+            git config user.email "actions@github.com"
+            git add state.json
+            git commit -m "état: mise à jour après run"
+            git pull --rebase origin main
+            git push
+          fi
