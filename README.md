@@ -20,8 +20,16 @@ proviennent exclusivement de variables d'environnement / secrets GitHub :
   4. notification par issue GitHub (e-mail automatique) en cas de succès,
      d'échec ou d'action manuelle requise — avec dédoublonnage.
 - `state.json` mémorise la réservation effectuée → jamais de double réservation ;
-  une fois réservé, les runs suivants s'arrêtent immédiatement.
-- Le workflow GitHub Actions tourne toutes les 5 minutes dans le cloud.
+  une fois réservé, les runs suivants s'arrêtent immédiatement. Si une action
+  manuelle a été demandée (`"status": "manual_action_required"`), le bot
+  n'insiste pas — remettre `"status": "watching"` pour relancer la surveillance.
+- Le workflow GitHub Actions fonctionne en « marathon » : le cron GitHub étant
+  fortement throttlé (déclenchements réels espacés de 1 à 3 h), chaque job
+  boucle ~5h30 avec un check toutes les ~5 min ; le cron ne sert qu'à mettre le
+  job suivant en file d'attente (groupe de concurrence) → cadence effective
+  ~5 min en continu. Un heartbeat quotidien dans `state.json` maintient le
+  dépôt actif (GitHub désactive les crons des dépôts inactifs 60 jours).
+- `meal` dans `config.json` : `"dinner"` (défaut) ou `"any"` (inclut le déjeuner).
 
 ## Points d'attention (relevés sur l'API en juillet 2026)
 

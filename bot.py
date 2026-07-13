@@ -89,6 +89,19 @@ def http_json(method, path, payload=None, headers=None, retries=3, backoff=50):
     return None, {"error": {"message": f"unreachable: {last_err}"}}
 
 
+PII_KEYS = {"firstname", "lastname", "email", "phone", "phone_number",
+            "customersheet", "customer", "civility", "optins", "country"}
+
+
+def sanitize(obj):
+    """Masque les champs personnels d'une réponse API avant log/notification."""
+    if isinstance(obj, dict):
+        return {k: ("<masqué>" if k in PII_KEYS else sanitize(v)) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [sanitize(x) for x in obj]
+    return obj
+
+
 def get_auth():
     status, data = http_json("GET", f"/getAuthToken?restaurantId={RID}")
     if status == 200 and "authToken" in data:
@@ -119,11 +132,11 @@ def slot_window_ok(obj):
     return True
 
 
-def find_bookable_slots(day_data, pax):
-    """Retourne [(time, shift), ...] triés, réservables pour `pax` au dîner."""
+def find_bookable_slots(day_data, pax, meal="dinner"):
+    """Retourne [(time, shift), ...] triés, réservables pour `pax` (dîner par défaut)."""
     out = []
     for shift in day_data.get("shifts", []):
-        if not is_dinner_shift(shift):
+        if meal != "any" and not is_dinner_shift(shift):
             continue
         if shift.get("marked_as_full"):
             continue
@@ -186,7 +199,7 @@ def make_booking(cfg, day, slot_time):
         headers={"timestamp": str(ts), "auth-token": token},
         retries=2, backoff=65,
     )
-    log(f"POST /booking → HTTP {status}: {json.dumps(resp, ensure_ascii=False)[:500]}")
+    log(f"POST /booking → HTTP {status}: {json.dumps(sanitize(resp), ensure_ascii=False)[:500]}")
     ok = status in (200, 201) and isinstance(resp, dict) and ("id" in resp or "uuid" in resp)
     return ok, resp
 
@@ -262,8 +275,17 @@ def main():
     targets = cfg["targets"]  # ordre = priorité
     state = load_json(STATE_PATH, {"status": "watching", "seen": {}})
 
+    today = paris_now().strftime("%Y-%m-%d")
+    if state.get("last_heartbeat") != today:
+        state["last_heartbeat"] = today
+        save_state(state)
+
     if state.get("status") == "booked":
         log(f"Déjà réservé ({state.get('booking', {})}) — rien à faire.")
+        return
+    if state.get("status") == "manual_action_required":
+        log("Action manuelle requise (voir notifications) — le bot n'insiste pas. "
+            "Remettre \"status\": \"watching\" dans state.json pour relancer.")
         return
 
     missing = [k for k in ("firstname", "lastname", "email", "phone_number", "civility") if not c.get(k)]
@@ -300,7 +322,7 @@ def main():
         if not day:
             log(f"{d}: pas de données")
             continue
-        slots = find_bookable_slots(day, pax)
+        slots = find_bookable_slots(day, pax, cfg.get("meal", "dinner"))
         n_shifts = len(day.get("shifts", []))
         log(f"{d}: {n_shifts} service(s), créneaux dîner x{pax}: {[s[0] for s in slots] or 'aucun'}")
         if slots:
@@ -343,7 +365,9 @@ def main():
                f"Réservation créée (id: {resp.get('id')}, uuid: {resp.get('uuid')}).\n"
                f"{confirmation_note}")
     else:
-        err = json.dumps(resp, ensure_ascii=False)[:800]
+        state["status"] = "manual_action_required"
+        save_state(state)
+        err = json.dumps(sanitize(resp), ensure_ascii=False)[:800]
         notify_once(state, f"bookfail:{day}", ttl_hours=6,
                     title=f"🔔 OUVERT le {day} — réservation auto ÉCHOUÉE, agir vite !",
                     body=f"Créneaux disponibles :\n{others}\n\n"

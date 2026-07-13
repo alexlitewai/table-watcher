@@ -2,7 +2,10 @@ name: watch
 
 on:
   schedule:
-    # Toutes les 5 minutes (GitHub peut décaler chaque run de quelques minutes).
+    # Le cron GitHub est fortement throttlé (constaté : 1 déclenchement / 1-3 h).
+    # Il sert uniquement de relais : chaque job boucle ~5h30 en vérifiant toutes
+    # les ~5 min, et le groupe de concurrence met le run suivant en file
+    # d'attente → il démarre dès la fin du job courant, sans chevauchement.
     - cron: "*/5 * * * *"
   workflow_dispatch: {}
 
@@ -17,11 +20,11 @@ permissions:
 jobs:
   check-and-book:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 350
     steps:
       - uses: actions/checkout@v4
 
-      - name: Vérifier les disponibilités et réserver
+      - name: Boucle de surveillance (~5h30, un check toutes les ~5 min)
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RESA_PHONE: ${{ secrets.RESA_PHONE }}
@@ -29,7 +32,16 @@ jobs:
           RESA_LASTNAME: ${{ secrets.RESA_LASTNAME }}
           RESA_EMAIL: ${{ secrets.RESA_EMAIL }}
           RESA_CIVILITY: ${{ secrets.RESA_CIVILITY }}
-        run: python3 bot.py
+        run: |
+          START=$(date +%s)
+          while [ $(( $(date +%s) - START )) -lt 19800 ]; do
+            python3 bot.py || true
+            if [ -f state.json ] && grep -qE '"status": "(booked|manual_action_required)"' state.json; then
+              echo "État final atteint — sortie de boucle."
+              break
+            fi
+            sleep 240
+          done
 
       - name: Persister l'état
         if: always()
@@ -39,6 +51,6 @@ jobs:
             git config user.email "actions@github.com"
             git add state.json
             git commit -m "état: mise à jour après run"
-            git pull --rebase origin main
-            git push
+            git pull --rebase origin "$GITHUB_REF_NAME" || true
+            git push origin "HEAD:$GITHUB_REF_NAME"
           fi
