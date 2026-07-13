@@ -36,8 +36,8 @@ jobs:
           START=$(date +%s)
           while [ $(( $(date +%s) - START )) -lt 19800 ]; do
             python3 bot.py || true
-            if [ -f state.json ] && grep -qE '"status": "(booked|manual_action_required)"' state.json; then
-              echo "État final atteint — sortie de boucle."
+            if [ -f state.json ] && grep -q '"status": "done"' state.json; then
+              echo "Tous les objectifs finalisés — sortie de boucle."
               break
             fi
             sleep 240

@@ -2,9 +2,12 @@
 
 Surveille les disponibilités d'un restaurant utilisant Zenchef et réserve
 automatiquement une table dès qu'une des dates cibles ouvre à la réservation
-en ligne. Les dates, l'heure préférée et le nombre de couverts sont dans
-`config.json` (`targets` est ordonné par priorité). Les coordonnées du client
-proviennent exclusivement de variables d'environnement / secrets GitHub :
+en ligne. `config.json` définit des **objectifs indépendants** (`goals`) : chaque
+objectif a son nom, ses dates (`targets`, ordonnées par priorité) et
+optionnellement `pax`, `meal`, `preferred_time`. Le bot réserve au plus une
+table par objectif et continue de surveiller les autres (utile pour guetter à
+la fois des annulations à court terme et une ouverture lointaine). Les
+coordonnées du client proviennent exclusivement de secrets GitHub :
 `RESA_CIVILITY`, `RESA_FIRSTNAME`, `RESA_LASTNAME`, `RESA_EMAIL`, `RESA_PHONE`.
 
 ## Fonctionnement
@@ -19,10 +22,11 @@ proviennent exclusivement de variables d'environnement / secrets GitHub :
      widget officiel) ;
   4. notification par issue GitHub (e-mail automatique) en cas de succès,
      d'échec ou d'action manuelle requise — avec dédoublonnage.
-- `state.json` mémorise la réservation effectuée → jamais de double réservation ;
-  une fois réservé, les runs suivants s'arrêtent immédiatement. Si une action
-  manuelle a été demandée (`"status": "manual_action_required"`), le bot
-  n'insiste pas — remettre `"status": "watching"` pour relancer la surveillance.
+- `state.json` mémorise l'état de chaque objectif (`booked`,
+  `manual_action_required`…) → jamais de double réservation, et jamais
+  d'insistance auprès du restaurant après un échec. Pour relancer un objectif
+  figé, remettre son `"status"` à `"watching"`. Quand tous les objectifs sont
+  finalisés, le statut global passe à `done` et les runs s'arrêtent aussitôt.
 - Le workflow GitHub Actions fonctionne en « marathon » : le cron GitHub étant
   fortement throttlé (déclenchements réels espacés de 1 à 3 h), chaque job
   boucle ~5h30 avec un check toutes les ~5 min ; le cron ne sert qu'à mettre le

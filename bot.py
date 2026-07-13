@@ -161,14 +161,14 @@ def pick_slot(slots, preferred="20:00"):
     return min(slots, key=lambda x: abs(minutes(x[0]) - pref))
 
 
-def make_booking(cfg, day, slot_time):
+def make_booking(cfg, day, slot_time, pax):
     ts, token = get_auth()
     if not token:
         return False, {"error": "no auth token"}
     c = cfg["customer"]
     payload = {
         "day": day,
-        "nb_guests": cfg["pax"],
+        "nb_guests": pax,
         "time": slot_time,
         "lang": c.get("lang", "fr"),
         "firstname": c["firstname"].strip(),
@@ -257,6 +257,95 @@ def group_targets(targets):
     return groups
 
 
+def fetch_availabilities(cfg, targets, first_request):
+    """GET par groupe de dates proches; renvoie {date: day_data}."""
+    availabilities = {}
+    for i, group in enumerate(group_targets(targets)):
+        if not first_request or i > 0:
+            time.sleep(cfg.get("request_spacing_seconds", 35))
+        begin, end = group[0], group[-1]
+        status, data = http_json("GET", f"/getAvailabilities?restaurantId={RID}&date_begin={begin}&date_end={end}")
+        if status != 200 or not isinstance(data, list):
+            log(f"Échec getAvailabilities {begin}..{end}: HTTP {status} {str(data)[:200]}")
+            continue
+        for day in data:
+            if day.get("date") in targets:
+                availabilities[day["date"]] = day
+    return availabilities
+
+
+def process_goal(cfg, goal, gstate, state, mode_book, first_request):
+    """Vérifie un objectif; réserve/notifie si une date s'ouvre. Renvoie True si données reçues."""
+    name = goal["name"]
+    pax = goal.get("pax", cfg.get("pax", 2))
+    meal = goal.get("meal", cfg.get("meal", "dinner"))
+    targets = goal["targets"]  # ordre = priorité
+
+    availabilities = fetch_availabilities(cfg, targets, first_request)
+    if not availabilities:
+        return False
+
+    candidates = []
+    for d in targets:
+        day = availabilities.get(d)
+        if not day:
+            log(f"[{name}] {d}: pas de données")
+            continue
+        slots = find_bookable_slots(day, pax, meal)
+        n_shifts = len(day.get("shifts", []))
+        log(f"[{name}] {d}: {n_shifts} service(s), créneaux x{pax}: {[s[0] for s in slots] or 'aucun'}")
+        if slots:
+            candidates.append((d, slots))
+
+    if not candidates:
+        return True
+
+    day, slots = candidates[0]
+    slot_time, shift = pick_slot(slots, goal.get("preferred_time", cfg.get("preferred_time", "19:30")))
+    widget = WIDGET_URL.format(rid=RID)
+    charge = shift.get("charge_param") or {}
+    needs_imprint = bool(charge.get("is_web_booking_askable"))
+    others = "\n".join(f"- {d} : {', '.join(s[0] for s in sl)}" for d, sl in candidates)
+
+    if not mode_book:
+        notify_once(state, f"open:{name}:{day}",
+                    f"🔔 [{name}] OUVERT le {day} — réserver vite !",
+                    f"Créneaux {pax} pers. disponibles :\n{others}\n\n"
+                    f"Réserver ici : {widget}\n"
+                    f"(Créneau conseillé : {day} à {slot_time})")
+        return True
+
+    ok, resp = make_booking(cfg, day, slot_time, pax)
+    if ok:
+        gstate["status"] = "booked"
+        gstate["booking"] = {
+            "date": day, "time": slot_time, "pax": pax,
+            "id": resp.get("id"), "uuid": resp.get("uuid"),
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+        save_state(state)
+        confirmation_note = "Le restaurant confirme manuellement : surveiller l'e-mail de confirmation Zenchef."
+        if needs_imprint:
+            confirmation_note += ("\n⚠️ Une empreinte bancaire peut être demandée pour finaliser — "
+                                  f"vérifier l'e-mail Zenchef ou le widget : {widget}")
+        notify(f"✅ [{name}] Réservé : {day} à {slot_time} ({pax} pers.)",
+               f"Réservation créée (id: {resp.get('id')}, uuid: {resp.get('uuid')}).\n"
+               f"{confirmation_note}")
+    else:
+        # Ne jamais insister en boucle auprès du restaurant : on fige cet objectif
+        # (remettre "watching" dans state.json pour relancer).
+        gstate["status"] = "manual_action_required"
+        save_state(state)
+        err = json.dumps(sanitize(resp), ensure_ascii=False)[:800]
+        notify_once(state, f"bookfail:{name}:{day}", ttl_hours=6,
+                    title=f"🔔 [{name}] OUVERT le {day} — réservation auto ÉCHOUÉE, agir vite !",
+                    body=f"Créneaux disponibles :\n{others}\n\n"
+                    f"La réservation automatique a échoué : `{err}`\n"
+                    f"{'⚠️ Empreinte bancaire requise par le restaurant — à faire à la main. ' if needs_imprint else ''}"
+                    f"Réservez manuellement ici : {widget}")
+    return True
+
+
 def main():
     cfg = load_json(CONFIG_PATH, None)
     if not cfg:
@@ -271,43 +360,42 @@ def main():
 
     global RID
     RID = cfg["restaurant_id"]
-    pax = cfg["pax"]
-    targets = cfg["targets"]  # ordre = priorité
-    state = load_json(STATE_PATH, {"status": "watching", "seen": {}})
+    goals = cfg["goals"]
+
+    state = load_json(STATE_PATH, {})
+    if "goals" not in state:  # migration depuis l'ancien format mono-objectif
+        state = {"status": "watching", "goals": {},
+                 "notified": state.get("notified", {}),
+                 "last_heartbeat": state.get("last_heartbeat")}
 
     today = paris_now().strftime("%Y-%m-%d")
     if state.get("last_heartbeat") != today:
         state["last_heartbeat"] = today
         save_state(state)
 
-    if state.get("status") == "booked":
-        log(f"Déjà réservé ({state.get('booking', {})}) — rien à faire.")
-        return
-    if state.get("status") == "manual_action_required":
-        log("Action manuelle requise (voir notifications) — le bot n'insiste pas. "
-            "Remettre \"status\": \"watching\" dans state.json pour relancer.")
-        return
-
     missing = [k for k in ("firstname", "lastname", "email", "phone_number", "civility") if not c.get(k)]
+    mode_book = cfg.get("mode", "book") == "book" and not missing
     if missing and cfg.get("mode", "book") == "book":
         log(f"ATTENTION: champs client manquants {missing} — mode notification seulement.")
 
-    # Interroge chaque groupe de dates (une requête par groupe, espacées).
-    availabilities = {}
-    groups = group_targets(targets)
-    for i, group in enumerate(groups):
-        if i > 0:
-            time.sleep(cfg.get("request_spacing_seconds", 45))
-        begin, end = group[0], group[-1]
-        status, data = http_json("GET", f"/getAvailabilities?restaurantId={RID}&date_begin={begin}&date_end={end}")
-        if status != 200 or not isinstance(data, list):
-            log(f"Échec getAvailabilities {begin}..{end}: HTTP {status} {str(data)[:200]}")
-            continue
-        for day in data:
-            if day.get("date") in targets:
-                availabilities[day["date"]] = day
+    pending = [g for g in goals
+               if state["goals"].get(g["name"], {}).get("status", "watching") == "watching"]
+    done = [g["name"] for g in goals if g not in pending]
+    if done:
+        log(f"Objectifs finalisés: {done}")
+    if not pending:
+        state["status"] = "done"
+        save_state(state)
+        log("Tous les objectifs sont finalisés — rien à faire.")
+        return
 
-    if not availabilities:
+    any_data = False
+    for gi, goal in enumerate(pending):
+        gstate = state["goals"].setdefault(goal["name"], {"status": "watching"})
+        if process_goal(cfg, goal, gstate, state, mode_book, first_request=(gi == 0)):
+            any_data = True
+
+    if not any_data:
         notify_once(state, "api-down", "⚠️ API injoignable",
                     "Aucune réponse exploitable de l'API Zenchef sur ce run "
                     "(rate limit, WAF/captcha ou panne). Si cela persiste sur "
@@ -315,66 +403,10 @@ def main():
                     ttl_hours=24)
         sys.exit(1)
 
-    # Résumé de l'état des dates cibles (dans l'ordre de priorité).
-    candidates = []
-    for d in targets:
-        day = availabilities.get(d)
-        if not day:
-            log(f"{d}: pas de données")
-            continue
-        slots = find_bookable_slots(day, pax, cfg.get("meal", "dinner"))
-        n_shifts = len(day.get("shifts", []))
-        log(f"{d}: {n_shifts} service(s), créneaux dîner x{pax}: {[s[0] for s in slots] or 'aucun'}")
-        if slots:
-            candidates.append((d, slots))
-
-    if not candidates:
-        log("Aucune date cible ouverte pour l'instant. Fin du run.")
-        return
-
-    # Une date est ouverte !
-    day, slots = candidates[0]
-    slot_time, shift = pick_slot(slots, cfg.get("preferred_time", "20:00"))
-    widget = WIDGET_URL.format(rid=RID)
-    charge = shift.get("charge_param") or {}
-    needs_imprint = bool(charge.get("is_web_booking_askable"))
-    others = "\n".join(f"- {d} : {', '.join(s[0] for s in sl)}" for d, sl in candidates)
-
-    if cfg.get("mode", "book") != "book" or missing:
-        notify_once(state, f"open:{day}",
-                    f"🔔 OUVERT le {day} — réserver vite !",
-                    f"Créneaux dîner {pax} pers. disponibles :\n{others}\n\n"
-                    f"Réserver ici : {widget}\n"
-                    f"(Créneau conseillé : {day} à {slot_time})")
-        return
-
-    ok, resp = make_booking(cfg, day, slot_time)
-    if ok:
-        state["status"] = "booked"
-        state["booking"] = {
-            "date": day, "time": slot_time, "pax": pax,
-            "id": resp.get("id"), "uuid": resp.get("uuid"),
-            "created_at": datetime.now(timezone.utc).isoformat(),
-        }
+    if all(state["goals"].get(g["name"], {}).get("status", "watching") != "watching" for g in goals):
+        state["status"] = "done"
         save_state(state)
-        confirmation_note = "Le restaurant confirme manuellement : surveiller l'e-mail de confirmation Zenchef."
-        if needs_imprint:
-            confirmation_note += ("\n⚠️ Une empreinte bancaire peut être demandée pour finaliser — "
-                                  f"vérifiez l'e-mail Zenchef ou le widget : {widget}")
-        notify(f"✅ Réservé : {day} à {slot_time} ({pax} pers.)",
-               f"Réservation créée (id: {resp.get('id')}, uuid: {resp.get('uuid')}).\n"
-               f"{confirmation_note}")
-    else:
-        state["status"] = "manual_action_required"
-        save_state(state)
-        err = json.dumps(sanitize(resp), ensure_ascii=False)[:800]
-        notify_once(state, f"bookfail:{day}", ttl_hours=6,
-                    title=f"🔔 OUVERT le {day} — réservation auto ÉCHOUÉE, agir vite !",
-                    body=f"Créneaux disponibles :\n{others}\n\n"
-                    f"La réservation automatique a échoué : `{err}`\n"
-                    f"{'⚠️ Empreinte bancaire requise par le restaurant — à faire à la main. ' if needs_imprint else ''}"
-                    f"Réservez manuellement ici : {widget}")
-        sys.exit(1)
+        log("Tous les objectifs sont finalisés.")
 
 
 if __name__ == "__main__":
