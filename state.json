@@ -2,10 +2,29 @@
   "status": "watching",
   "goals": {
     "sept-2026": {
-      "status": "watching"
+      "status": "booked",
+      "booking": {
+        "date": "2026-09-14",
+        "time": "19:30",
+        "pax": 2,
+        "id": 377873394,
+        "uuid": "a4999985-a89f-42c1-a2a8-c7afe518fbb3",
+        "created_at": "2026-08-04T14:14:16.677147+00:00"
+      }
     },
     "hiver-2026-2027": {
       "status": "watching"
+    },
+    "test-shotgun-nov": {
+      "status": "booked",
+      "booking": {
+        "date": "2026-11-03",
+        "time": "19:30",
+        "pax": 2,
+        "id": 377871520,
+        "uuid": "ad6f2ff5-a665-4410-979b-71a52b985310",
+        "created_at": "2026-08-04T14:08:29.013577+00:00"
+      }
     }
   },
   "notified": {
