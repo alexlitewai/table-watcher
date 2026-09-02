@@ -1,5 +1,5 @@
 {
-  "status": "watching",
+  "status": "done",
   "goals": {
     "sept-2026": {
       "status": "booked",
@@ -13,7 +13,15 @@
       }
     },
     "hiver-2026-2027": {
-      "status": "watching"
+      "status": "booked",
+      "booking": {
+        "date": "2026-12-11",
+        "time": "19:30",
+        "pax": 2,
+        "id": 391824150,
+        "uuid": "b3ff3276-8945-44dd-ad3f-163131b3d23b",
+        "created_at": "2026-09-02T17:15:45.910886+00:00"
+      }
     },
     "test-shotgun-nov": {
       "status": "booked",
